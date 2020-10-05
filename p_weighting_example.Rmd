@@ -1,0 +1,226 @@
+---
+title: "Grammatic Evolution Experimentation"
+output: html_notebook
+---
+
+This notebook runs a simulation to experiment with using grammatical evolution to recover an unknown functional form for a probability weighting function. In economics it is often proposesd that individuals persistently distort probabilities or engage in "probability weighting". Finding a functional form that maps the objective probabilities into the subjective decision probabilities that individuals are using to make choices would be a great asset in analyzing human behavior. I doubt a susinct functional representation exists. This simulation however tests to see if grammatical evolution could be used as a tool to recover the functional form that best maps the objective probability to the weighted decision probability.
+
+## Set up environment
+```{r}
+# clear current environment
+rm(list = ls()) # clear console
+
+# set workind directory
+setwd("/home/dylan/Dropbox")
+
+# load libraries 
+library(gramEvol)
+library(ggplot2)
+
+# load probability weighting functions that are commonly proposed in the existing literature
+source('weighting_functions.R')
+
+#set seed
+set.seed(12345678)
+```
+
+
+## Generate Some Fake Data
+
+### Generate hypothetical objective probabilities
+I'm generating probabilities that have a distribution with most of the mass below .2 because I'm interested in using this technique in applications with low probability, high consequence events (such as natural disasters)
+
+```{r}
+# generate some data
+n <- 1000 # number of observations
+
+# generate some objective probabilities by passing randomly generated, normally distributed data through a logit transformation
+objective_p <- 1/(1+exp(-rnorm(n,mean = -2,sd = 1))) 
+objective_p_saved <- objective_p
+ggplot(data.frame(objective_p), aes(x=objective_p)) + 
+  geom_histogram() + xlab("Generated Objective Probability")
+  
+
+```
+
+
+### Distort the Objective Probabilities
+I'm going to assume that our sample distorts objective probabilities according to the prelec weighting function which takes the following functional form, where p is the objective probability and alpha is a parameter that controls the curvature of the weighting function.
+$$
+exp(-(-log(p)))^\alpha
+$$
+
+Next I'm specifying the hypothetical parameter of the weighting function, alpha, and passing the generated objective probabilities through this function. Finnally, I apply a random perturbation to the data points to simulate measurement error.
+
+```{r}
+alpha <- 2 # parameter in the weighting function
+alpha_true <- alpha # save this parameter for later use
+
+# weight the objective data 
+prelec1_p <- exp(-(-log(objective_p))^alpha)
+
+# randomly perturb that weighted data to simulate measurement error
+prelec1_p_noise <- jitter(prelec1_p, amount = 0.1) 
+
+# put observations back in the unit interval that were moved outside of it
+# due to the random perturbation
+prelec1_p_noise <- replace(prelec1_p_noise, prelec1_p_noise < 0, 0)
+prelec1_p_noise <- replace(prelec1_p_noise, prelec1_p_noise > 1, 1)
+
+# plot histograme
+ggplot(data.frame(prelec1_p_noise), aes(x=prelec1_p_noise)) + 
+  geom_histogram() + xlab("Weighted Probabilities with Artificial Measurement Error")
+  
+
+```
+
+
+Plot the generated objective probabilities, the weighted objective probabilities, and the weighted objective probabilities with random noise. 
+```{r}
+# plot the distributions of the objective, weighted, and weighted with random noise probabilities 
+plot(density(prelec1_p, bw = .01), type ="l",lwd = 2 ,lty = 1,col = "blue",
+     xlab = "Probability", ylab = "Density", 
+     main = paste("Distribution of Generated Probabilities ( n = ",n,")", sep=" "))
+lines(density(objective_p, bw = .01), type ="l",lwd = 2 ,lty = 1,col = "black" )
+lines(density(prelec1_p_noise, bw = .01), type ="l",lwd = 2 ,lty = 1,col = "red")
+legend(.3,15,legend = c("Objective Prob.","Weighted Prob.","Weighted Prob. With Random Noise"), col=c("black", "blue", "red"), lty=1:1)
+axis(1, at=c(0,200,400,600,800,1000), labels=c("0.0", "0.2","0.4","0.6","0.8","1.0"))
+```
+
+The goal now is to use grammatical evolution to recover the weighting function used (prelec weighting function with alpha = 2) by feeding the algorithm the data represented by the black line in the above graph and the red line in the above graph. The algorithm then has to find the function that maps the black line to the red line. I'm using three methods to do this. The first is by explicitly specifying common weighting functions in the literature, one of which is the prelec weighting function (call this method "explicit"). The second is by specifying a grammer for the algorithm to use, but not specifying any explicit function to try (call this method "freeform"). The third is by specifying a hybrid approach. The hybrid approach suggests the common weighting function but the algorithm also has a grammer defined so that it can also search for different weighting functions (call this method "hybrid").
+
+```{r}
+# define grammer rules for the freeform approach
+ruleDef_freeform <- list(expr = grule(op(expr, expr), func(expr) , func(var),var),
+                         func = grule(exp, log, cos, sin,tan), # functions to use
+                         op = grule(`+`, `-`, `*`,`/`,`^`), # math opperations to use
+                         var = grule(objective_p, b1,b2),  # variables that are allowed to be manipulated
+                         b1 = gvrule(seq(0,100,.01)), 
+                         b2 = gvrule(seq(0,100,.01))
+)
+
+# create a grammer using the freeform rules
+grammarDef_freeform <- CreateGrammar(ruleDef_freeform)
+
+
+# define the grammer for the hybrid approach
+ruleDef_hybrid <- list(expr = grule(op(expr, expr), 
+                                   p.weight.2(p,alpha1) , 
+                                   p.weight.3(p,alpha1,alpha2) ,
+                                   func(func(expr)),  # nest an expression within an expression 
+                                   func(var),  # pass a var through a function
+                                   var), # use "var" within any opperations
+                      func = grule(sin, cos, log, exp),
+                      p.weight.2 = grule(prelec1.weight, # define 2 input (1 parameter) weighting functions
+                                         kt.weight,
+                                         power.weight),
+                      p.weight.3 = grule(prelec2.weight, # define 3 input (2 parameter weighting functions)
+                                         wg.weight,
+                                         ge.weight),
+                      op = grule(`+`, `-`, `*`,`/`,`^`), # define the types of mathematical opperations allowed
+                      var = gvrule(seq(0,10,.1)),  # define a general variable that can be used anywhere
+                      alpha1 = gvrule(seq(-5,5,.01)), # define the range of alpha1
+                      alpha2 = gvrule(seq(-5,5,.01)), # define the range of alpha2
+                      p = grule(objective_p)) # define p as the objective probability
+
+# create a grammer using the hybrid rules
+grammarDef_hybrid <- CreateGrammar(ruleDef_hybrid)
+
+
+# define a grammer using only explicit weighting functions
+ruleDef_explicit <- list(expr = grule(op(expr,one), # take two expressions and apply an opperation between them
+                             p.weight.2(p,alpha1) , 
+                             p.weight.3(p,alpha1,alpha2)),
+                p.weight.2 = grule(prelec1.weight, # define 2 input (1 parameter) weighting functions
+                                   kt.weight,
+                                   power.weight),
+                p.weight.3 = grule(prelec2.weight, # define 3 input (2 parameter weighting functions)
+                                   wg.weight,
+                                   ge.weight),
+                op = grule(`*`), # define the types of mathematical opperations allowed
+                alpha1 = gvrule(seq(-5,5,.01)), # define the range of alpha1
+                alpha2 = gvrule(seq(-5,5,.01)), # define the range of alpha2
+                one = grule(1),
+                p = grule(objective_p)) # define p as the objective probability
+
+# create a grammer using the explicit grammer rules
+grammarDef_explicit <- CreateGrammar(ruleDef_explicit)
+```
+
+
+## Specify a cost function
+```{r}
+# define a cost function to minimize  
+costFunc <- function(expr) {
+  result <- eval(expr)
+  if (any(is.nan(result))){
+   return(Inf)
+  }
+  return (mean(log(1 + abs(prelec1_p_noise - result))))
+}
+
+```
+
+
+## Run the algorithm
+
+### explicit method
+```{r}
+# GE explicit
+ge_explicit <- GrammaticalEvolution(grammarDef_explicit,costFunc, terminationCost = 0.011, iterations = 1000)
+```
+
+### hybrid method
+```{r}
+# GE hybrid
+ge_hybrid <- GrammaticalEvolution(grammarDef_hybrid, costFunc, terminationCost = 0.03, iterations = 1000) 
+```
+
+### freeform method
+```{r}
+# GE free form
+ge_freeform <- GrammaticalEvolution(grammarDef_freeform, costFunc, terminationCost = 0.03, iterations = 1000) 
+```
+
+
+## Best Functional Forms
+```{r}
+print(paste("Best expression from explicitly defined weighting functions:", ge_explicit$best$expressions))
+
+print(paste("Best expression from hyprid method:", ge_hybrid$best$expressions))
+
+print(paste("Best expression from free form method:", ge_freeform$best$expressions))
+
+```
+The explicit method and hybrid method both selected the predefined prelec weighting function. The explicit method selected a weighting parameter of 1.93 and the hybrid method selected a paramter value of 1.96. Both of these values are quite close to the true weighting parameter of 2. The freeform method is much more interesting. Again, the grammer for this method did not include any predefined function meaning the algorithm had to generate the function from scratch. I'll plot all of these weighting functions below to get a sense for how much they match the origonal data generating process.
+
+
+```{r}
+# save the best functional forms from each approach
+best_freeform <- ge_freeform$best$expression
+best_mixed <- ge_hybrid$best$expression
+best_explicit <- ge_explicit$best$expression
+
+# create a data frame of transformed probabilities to plot
+alpha <- alpha_true
+x <- seq(0.0000001,.9999999999,.001) 
+weighting_functions <- data.frame(x)
+weighting_functions$prelec <- exp(-(-log(x))^alpha_true) 
+objective_p <- x
+weighting_functions$freeform <- eval(best_freeform)
+weighting_functions$mixed <- eval(best_mixed)
+weighting_functions$explicit <- eval(best_explicit)
+
+# plot unweighted probabilities and weighted probabilities using the best functional form from each approach
+plot(weighting_functions$x, type ="l",lwd = 2 ,lty = 2,col = "grey40", xlab = "Objective Probability", ylab = "Weighted Probability", main = "Estimated Weighting Functions", xaxt="n")
+lines(weighting_functions$prelec, col = "black")
+lines(weighting_functions$freeform, col = "red")
+lines(weighting_functions$explicit, col = "blue")
+lines(weighting_functions$mixed, col = "green")
+legend(0,.98,legend = c("True DGP","Explicit","Freeform","Hybrid"), col=c("black", "blue", "red", "green"), lty=1:1)
+axis(1, at=c(0,200,400,600,800,1000), labels=c("0.0", "0.2","0.4","0.6","0.8","1.0"))
+
+```
+The explicit and hybrid methods produce weighting functions that are almost identical to the origonal data generating process. This is not surprising since they selected the same function used to generate the data and both selected parameter values almost identical to the true parameter value. The freeform method produced a novel function that has the same properties as the data generating function which is quite remarkable. The freeform generated function under-weights low probabilities , over-weights high probabilities and the objective probability equals the weighted probability for probabilities of about .37, just like the actual prelec weighting function. Overall the approach seems promising. This is a stylized example though. Real data will likely be much messier and have a less clearly defined mapping from objective probabilities to probabilities implied by observed behavior.  
+
+
