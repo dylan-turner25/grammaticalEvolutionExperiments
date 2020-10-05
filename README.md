@@ -1,5 +1,5 @@
 # grammaticalEvolutionExperiments
-Experimenting with using grammatical evolution to recover functional forms for unknown data generating processes.
+Experimenting with using grammatical evolution to recover functional forms for unknown data generating processes. The rendered R notebook can be viewed at https://rpubs.com/dylan_turner25/pwe
 
 
 # Overview
